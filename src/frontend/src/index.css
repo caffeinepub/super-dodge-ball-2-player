@@ -1,0 +1,101 @@
+@font-face {
+  font-family: "Bricolage Grotesque";
+  src: url("/assets/fonts/BricolageGrotesque.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Figtree";
+  src: url("/assets/fonts/Figtree.woff2") format("woff2");
+  font-weight: 300 900;
+  font-display: swap;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0.15 0.02 260;
+    --foreground: 0.97 0.01 260;
+    --card: 0.18 0.03 260;
+    --card-foreground: 0.97 0.01 260;
+    --popover: 0.18 0.03 260;
+    --popover-foreground: 0.97 0.01 260;
+    --primary: 0.75 0.22 145;
+    --primary-foreground: 0.1 0.01 260;
+    --secondary: 0.22 0.04 260;
+    --secondary-foreground: 0.97 0.01 260;
+    --muted: 0.22 0.04 260;
+    --muted-foreground: 0.65 0.04 260;
+    --accent: 0.7 0.25 30;
+    --accent-foreground: 0.1 0.01 260;
+    --destructive: 0.62 0.25 27;
+    --destructive-foreground: 0.97 0.01 260;
+    --border: 0.28 0.04 260;
+    --input: 0.28 0.04 260;
+    --ring: 0.75 0.22 145;
+    --radius: 0.5rem;
+    --chart-1: 0.75 0.22 145;
+    --chart-2: 0.7 0.25 30;
+    --chart-3: 0.65 0.22 240;
+    --chart-4: 0.72 0.2 60;
+    --chart-5: 0.68 0.2 300;
+    --sidebar: 0.13 0.02 260;
+    --sidebar-foreground: 0.97 0.01 260;
+    --sidebar-primary: 0.75 0.22 145;
+    --sidebar-primary-foreground: 0.1 0.01 260;
+    --sidebar-accent: 0.22 0.04 260;
+    --sidebar-accent-foreground: 0.97 0.01 260;
+    --sidebar-border: 0.28 0.04 260;
+    --sidebar-ring: 0.75 0.22 145;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: "Figtree", sans-serif;
+  }
+}
+
+/* Game-specific animations */
+@keyframes titlePulse {
+  0%,
+  100% {
+    text-shadow: 0 0 20px oklch(0.75 0.22 145 / 0.8), 0 0 40px
+      oklch(0.75 0.22 145 / 0.4);
+  }
+  50% {
+    text-shadow: 0 0 30px oklch(0.75 0.22 145), 0 0 60px
+      oklch(0.75 0.22 145 / 0.6), 0 0 80px oklch(0.7 0.25 30 / 0.3);
+  }
+}
+
+@keyframes hitFlash {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.title-pulse {
+  animation: titlePulse 2s ease-in-out infinite;
+}
+
+.score-badge {
+  background: linear-gradient(
+    135deg,
+    oklch(0.22 0.04 260),
+    oklch(0.18 0.03 260)
+  );
+  border: 1px solid oklch(0.35 0.08 260);
+}
