@@ -30,7 +30,7 @@ actor {
 
   let rooms = Map.empty<Text, RoomState>();
 
-  func generateCode() : async Text {
+  func generateCode() : async* Text {
     let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let letterIter = alphabet.chars();
     let letterArray = letterIter.toArray();
@@ -50,7 +50,7 @@ actor {
     var code = "";
     var unique = false;
     while (not unique) {
-      code := await generateCode();
+      code := await* generateCode();
       unique := not rooms.containsKey(code);
     };
     let state : RoomState = {
