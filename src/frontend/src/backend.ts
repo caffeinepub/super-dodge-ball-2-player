@@ -89,10 +89,107 @@ export class ExternalBlob {
         return this;
     }
 }
-export interface backendInterface {
+export interface RoomState {
+    p1Y: number;
+    p2Y: number;
+    p1Hits: bigint;
+    lastUpdated: bigint;
+    winner: string;
+    balls: Array<BallData>;
+    gameOver: boolean;
+    p2Hits: bigint;
+    p2Joined: boolean;
+    p2ThrowBall: boolean;
 }
+export interface BallData {
+    x: number;
+    y: number;
+    vy: number;
+    speed: number;
+}
+export interface backendInterface {
+    createRoom(): Promise<string>;
+    getState(code: string): Promise<RoomState | null>;
+    joinRoom(code: string): Promise<boolean>;
+    pushGuestInput(code: string, p2Y: number, throwBall: boolean): Promise<void>;
+    pushHostState(code: string, p1Y: number, p2Y: number, balls: Array<BallData>, p1Hits: bigint, p2Hits: bigint, gameOver: boolean, winner: string): Promise<void>;
+}
+import type { RoomState as _RoomState } from "./declarations/backend.did.d.ts";
 export class Backend implements backendInterface {
     constructor(private actor: ActorSubclass<_SERVICE>, private _uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, private _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, private processError?: (error: unknown) => never){}
+    async createRoom(): Promise<string> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.createRoom();
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.createRoom();
+            return result;
+        }
+    }
+    async getState(arg0: string): Promise<RoomState | null> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.getState(arg0);
+                return from_candid_opt_n1(this._uploadFile, this._downloadFile, result);
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.getState(arg0);
+            return from_candid_opt_n1(this._uploadFile, this._downloadFile, result);
+        }
+    }
+    async joinRoom(arg0: string): Promise<boolean> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.joinRoom(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.joinRoom(arg0);
+            return result;
+        }
+    }
+    async pushGuestInput(arg0: string, arg1: number, arg2: boolean): Promise<void> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.pushGuestInput(arg0, arg1, arg2);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.pushGuestInput(arg0, arg1, arg2);
+            return result;
+        }
+    }
+    async pushHostState(arg0: string, arg1: number, arg2: number, arg3: Array<BallData>, arg4: bigint, arg5: bigint, arg6: boolean, arg7: string): Promise<void> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.pushHostState(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.pushHostState(arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7);
+            return result;
+        }
+    }
+}
+function from_candid_opt_n1(_uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, value: [] | [_RoomState]): RoomState | null {
+    return value.length === 0 ? null : value[0];
 }
 export interface CreateActorOptions {
     agent?: Agent;

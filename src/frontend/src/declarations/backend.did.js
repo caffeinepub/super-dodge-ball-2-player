@@ -8,10 +8,88 @@
 
 import { IDL } from '@icp-sdk/core/candid';
 
-export const idlService = IDL.Service({});
+export const BallData = IDL.Record({
+  'x' : IDL.Float64,
+  'y' : IDL.Float64,
+  'vy' : IDL.Float64,
+  'speed' : IDL.Float64,
+});
+export const RoomState = IDL.Record({
+  'p1Y' : IDL.Float64,
+  'p2Y' : IDL.Float64,
+  'p1Hits' : IDL.Nat,
+  'lastUpdated' : IDL.Int,
+  'winner' : IDL.Text,
+  'balls' : IDL.Vec(BallData),
+  'gameOver' : IDL.Bool,
+  'p2Hits' : IDL.Nat,
+  'p2Joined' : IDL.Bool,
+  'p2ThrowBall' : IDL.Bool,
+});
+
+export const idlService = IDL.Service({
+  'createRoom' : IDL.Func([], [IDL.Text], []),
+  'getState' : IDL.Func([IDL.Text], [IDL.Opt(RoomState)], ['query']),
+  'joinRoom' : IDL.Func([IDL.Text], [IDL.Bool], []),
+  'pushGuestInput' : IDL.Func([IDL.Text, IDL.Float64, IDL.Bool], [], []),
+  'pushHostState' : IDL.Func(
+      [
+        IDL.Text,
+        IDL.Float64,
+        IDL.Float64,
+        IDL.Vec(BallData),
+        IDL.Nat,
+        IDL.Nat,
+        IDL.Bool,
+        IDL.Text,
+      ],
+      [],
+      [],
+    ),
+});
 
 export const idlInitArgs = [];
 
-export const idlFactory = ({ IDL }) => { return IDL.Service({}); };
+export const idlFactory = ({ IDL }) => {
+  const BallData = IDL.Record({
+    'x' : IDL.Float64,
+    'y' : IDL.Float64,
+    'vy' : IDL.Float64,
+    'speed' : IDL.Float64,
+  });
+  const RoomState = IDL.Record({
+    'p1Y' : IDL.Float64,
+    'p2Y' : IDL.Float64,
+    'p1Hits' : IDL.Nat,
+    'lastUpdated' : IDL.Int,
+    'winner' : IDL.Text,
+    'balls' : IDL.Vec(BallData),
+    'gameOver' : IDL.Bool,
+    'p2Hits' : IDL.Nat,
+    'p2Joined' : IDL.Bool,
+    'p2ThrowBall' : IDL.Bool,
+  });
+  
+  return IDL.Service({
+    'createRoom' : IDL.Func([], [IDL.Text], []),
+    'getState' : IDL.Func([IDL.Text], [IDL.Opt(RoomState)], ['query']),
+    'joinRoom' : IDL.Func([IDL.Text], [IDL.Bool], []),
+    'pushGuestInput' : IDL.Func([IDL.Text, IDL.Float64, IDL.Bool], [], []),
+    'pushHostState' : IDL.Func(
+        [
+          IDL.Text,
+          IDL.Float64,
+          IDL.Float64,
+          IDL.Vec(BallData),
+          IDL.Nat,
+          IDL.Nat,
+          IDL.Bool,
+          IDL.Text,
+        ],
+        [],
+        [],
+      ),
+  });
+};
 
 export const init = ({ IDL }) => { return []; };
