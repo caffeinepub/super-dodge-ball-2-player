@@ -7,6 +7,7 @@ interface Player {
   w: number;
   h: number;
   hits: number;
+  eliminated: boolean;
 }
 
 interface Ball {
@@ -15,53 +16,71 @@ interface Ball {
   speed: number;
   vy: number;
   trail: { x: number; y: number }[];
+  owner?: "p1" | "p2" | "p3";
 }
 
-type GameMode = "2p" | "ai" | "online";
+type GameMode = "2p" | "ai" | "online" | "3p";
 
 interface GameState {
   p1: Player;
   p2: Player;
+  p3: Player;
   balls: Ball[];
   gameOver: boolean;
   lastThrow1: number;
   lastThrow2: number;
+  lastThrow3: number;
   keys: Record<string, boolean>;
   animFrameId: number;
   p1Flash: number;
   p2Flash: number;
+  p3Flash: number;
   mode: GameMode;
 }
 
 const CANVAS_W = 800;
 const CANVAS_H = 400;
 const COOLDOWN = 750;
+const P3_COOLDOWN = 500; // shorter cooldown for the middle player
 const MAX_HITS = 3;
-const BALL_SPEED = 7;
-const AI_SPEED = 3.2;
+const BALL_SPEED = 4;
+const AI_SPEED = 2;
 const AI_THROW_COOLDOWN = 900;
+
+function makePlayer(x: number, y: number): Player {
+  return { x, y, w: 44, h: 56, hits: 0, eliminated: false };
+}
 
 function makeInitialState(mode: GameMode): GameState {
   return {
-    p1: { x: 50, y: 180, w: 44, h: 56, hits: 0 },
-    p2: { x: 706, y: 180, w: 44, h: 56, hits: 0 },
+    p1: makePlayer(20, 172),
+    p2: makePlayer(736, 172),
+    p3: { ...makePlayer(378, 172), w: 36, h: 46 },
     balls: [],
     gameOver: false,
     lastThrow1: 0,
     lastThrow2: 0,
+    lastThrow3: 0,
     keys: {},
     animFrameId: 0,
     p1Flash: 0,
     p2Flash: 0,
+    p3Flash: 0,
     mode,
   };
+}
+
+function hitTest(b: Ball, p: Player): boolean {
+  return (
+    b.x + 8 > p.x && b.x - 8 < p.x + p.w && b.y + 8 > p.y && b.y - 8 < p.y + p.h
+  );
 }
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [mode, setMode] = useState<GameMode>("2p");
   const stateRef = useRef<GameState>(makeInitialState("2p"));
-  const [score, setScore] = useState({ p1: 0, p2: 0 });
+  const [score, setScore] = useState({ p1: 0, p2: 0, p3: 0 });
   const [winner, setWinner] = useState<string | null>(null);
 
   // Online multiplayer state
@@ -83,7 +102,6 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [connectionLost, setConnectionLost] = useState(false);
 
-  // Refs for online sync (avoid stale closures in intervals)
   const onlineRoleRef = useRef<"host" | "guest" | null>(null);
   const roomCodeRef = useRef<string>("");
   const p2ThrowPendingRef = useRef(false);
@@ -105,14 +123,17 @@ export default function App() {
     const fresh = makeInitialState(m);
     s.p1 = fresh.p1;
     s.p2 = fresh.p2;
-    s.balls = fresh.balls;
+    s.p3 = fresh.p3;
+    s.balls = [];
     s.gameOver = false;
     s.lastThrow1 = 0;
     s.lastThrow2 = 0;
+    s.lastThrow3 = 0;
     s.p1Flash = 0;
     s.p2Flash = 0;
+    s.p3Flash = 0;
     s.mode = m;
-    setScore({ p1: 0, p2: 0 });
+    setScore({ p1: 0, p2: 0, p3: 0 });
     setWinner(null);
     latestServerStateRef.current = null;
   }, []);
@@ -136,7 +157,6 @@ export default function App() {
     [resetGame],
   );
 
-  // Online: Create room (P1 / host)
   const handleCreateRoom = useCallback(async () => {
     const a = actorRef.current;
     if (!a) return;
@@ -157,7 +177,6 @@ export default function App() {
     }
   }, [resetGame]);
 
-  // Online: Join room (P2 / guest)
   const handleJoinRoom = useCallback(async () => {
     const a = actorRef.current;
     if (!a || !codeInput.trim()) return;
@@ -183,7 +202,6 @@ export default function App() {
     }
   }, [codeInput, resetGame]);
 
-  // Online: copy room code to clipboard
   const handleCopyCode = useCallback(() => {
     navigator.clipboard.writeText(roomCode).then(() => {
       setCopied(true);
@@ -191,7 +209,6 @@ export default function App() {
     });
   }, [roomCode]);
 
-  // Online: waiting room polling (P1 waits for P2 to join)
   useEffect(() => {
     if (
       mode !== "online" ||
@@ -204,31 +221,22 @@ export default function App() {
       if (!a) return;
       try {
         const state = await a.getState(roomCodeRef.current);
-        if (state?.p2Joined) {
-          setOnlineScreen("ingame");
-        }
-      } catch {
-        // ignore poll errors
-      }
+        if (state?.p2Joined) setOnlineScreen("ingame");
+      } catch {}
     }, 1500);
     return () => clearInterval(interval);
   }, [mode, onlineScreen, playerRole]);
 
-  // Online: game sync interval
-  // Push and pull run in parallel to halve the per-tick latency.
   useEffect(() => {
     if (mode !== "online" || onlineScreen !== "ingame") return;
-
     let syncing = false;
-
     const interval = setInterval(async () => {
-      if (syncing) return; // skip tick if previous one is still in-flight
+      if (syncing) return;
       const a = actorRef.current;
       const code = roomCodeRef.current;
       const role = onlineRoleRef.current;
       const s = stateRef.current;
       if (!a || !code || !role) return;
-
       syncing = true;
       try {
         if (role === "host") {
@@ -238,7 +246,6 @@ export default function App() {
             vy: b.vy,
             speed: b.speed,
           }));
-          // Push and pull in parallel
           const [, serverState] = await Promise.all([
             a.pushHostState(
               code,
@@ -256,114 +263,150 @@ export default function App() {
             ),
             a.getState(code),
           ]);
-          if (serverState) {
+          if (serverState)
             latestServerStateRef.current = {
               ...serverState,
               p1Hits: Number(serverState.p1Hits),
               p2Hits: Number(serverState.p2Hits),
             };
-          } else {
-            setConnectionLost(true);
-          }
+          else setConnectionLost(true);
         } else {
           const throwNow = p2ThrowPendingRef.current;
           p2ThrowPendingRef.current = false;
-          // Push and pull in parallel
           const [, serverState] = await Promise.all([
             a.pushGuestInput(code, s.p2.y, throwNow),
             a.getState(code),
           ]);
-          if (serverState) {
+          if (serverState)
             latestServerStateRef.current = {
               ...serverState,
               p1Hits: Number(serverState.p1Hits),
               p2Hits: Number(serverState.p2Hits),
             };
-          } else {
-            setConnectionLost(true);
-          }
+          else setConnectionLost(true);
         }
       } catch {
-        // ignore transient errors
       } finally {
         syncing = false;
       }
     }, 80);
-
     return () => clearInterval(interval);
   }, [mode, onlineScreen]);
 
-  // Main game loop
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
     const s = stateRef.current;
 
     const onKeyDown = (e: KeyboardEvent) => {
       s.keys[e.key] = true;
       const now = Date.now();
 
+      // P1 throw
       if ((e.key === "f" || e.key === "F") && !s.gameOver) {
-        // P1 throw: only in 2p, ai, or online-host
         const isOnlineHost =
           s.mode === "online" && onlineRoleRef.current === "host";
-        const canP1Throw = s.mode !== "online" || isOnlineHost;
-        if (canP1Throw && now - s.lastThrow1 > COOLDOWN) {
+        if (
+          (s.mode !== "online" || isOnlineHost) &&
+          !s.p1.eliminated &&
+          now - s.lastThrow1 > COOLDOWN
+        ) {
           s.balls.push({
             x: s.p1.x + s.p1.w + 4,
             y: s.p1.y + s.p1.h / 2,
             speed: BALL_SPEED,
             vy: (Math.random() - 0.5) * 2,
             trail: [],
+            owner: "p1",
           });
           s.lastThrow1 = now;
         }
       }
 
+      // P2 throw
       if ((e.key === "l" || e.key === "L") && !s.gameOver) {
-        if (s.mode === "2p") {
-          if (now - s.lastThrow2 > COOLDOWN) {
-            s.balls.push({
-              x: s.p2.x - 4,
-              y: s.p2.y + s.p2.h / 2,
-              speed: -BALL_SPEED,
-              vy: (Math.random() - 0.5) * 2,
-              trail: [],
-            });
-            s.lastThrow2 = now;
-          }
+        if (
+          s.mode === "2p" &&
+          !s.p2.eliminated &&
+          now - s.lastThrow2 > COOLDOWN
+        ) {
+          s.balls.push({
+            x: s.p2.x - 4,
+            y: s.p2.y + s.p2.h / 2,
+            speed: -BALL_SPEED,
+            vy: (Math.random() - 0.5) * 2,
+            trail: [],
+            owner: "p2",
+          });
+          s.lastThrow2 = now;
         } else if (s.mode === "online" && onlineRoleRef.current === "guest") {
-          // Guest flags throw; interval will send it
           p2ThrowPendingRef.current = true;
+        } else if (
+          s.mode === "3p" &&
+          !s.p2.eliminated &&
+          now - s.lastThrow2 > COOLDOWN
+        ) {
+          s.balls.push({
+            x: s.p2.x - 4,
+            y: s.p2.y + s.p2.h / 2,
+            speed: -BALL_SPEED,
+            vy: (Math.random() - 0.5) * 2,
+            trail: [],
+            owner: "p2",
+          });
+          s.lastThrow2 = now;
         }
       }
 
-      if (e.key === "1") {
-        if (s.mode !== "online") resetGame();
+      // P3 throws (3p mode): J = left (towards P1), O = right (towards P2)
+      if (s.mode === "3p" && !s.gameOver && !s.p3.eliminated) {
+        if (
+          (e.key === "j" || e.key === "J") &&
+          now - s.lastThrow3 > P3_COOLDOWN
+        ) {
+          s.balls.push({
+            x: s.p3.x - 4,
+            y: s.p3.y + s.p3.h / 2,
+            speed: -BALL_SPEED,
+            vy: (Math.random() - 0.5) * 2,
+            trail: [],
+            owner: "p3",
+          });
+          s.lastThrow3 = now;
+        }
+        if (
+          (e.key === "o" || e.key === "O") &&
+          now - s.lastThrow3 > P3_COOLDOWN
+        ) {
+          s.balls.push({
+            x: s.p3.x + s.p3.w + 4,
+            y: s.p3.y + s.p3.h / 2,
+            speed: BALL_SPEED,
+            vy: (Math.random() - 0.5) * 2,
+            trail: [],
+            owner: "p3",
+          });
+          s.lastThrow3 = now;
+        }
       }
 
-      if (["ArrowUp", "ArrowDown", " "].includes(e.key)) {
-        e.preventDefault();
-      }
+      if (e.key === "1" && s.mode !== "online") resetGame();
+      if (["ArrowUp", "ArrowDown", " "].includes(e.key)) e.preventDefault();
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
       s.keys[e.key] = false;
     };
-
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
 
-    // ---- AI logic ----
     function updateAI() {
       if (s.gameOver || s.mode !== "ai") return;
       const now = Date.now();
       const ai = s.p2;
       const p1 = s.p1;
-
       let threatBall: Ball | null = null;
       let minDist = Number.POSITIVE_INFINITY;
       for (const b of s.balls) {
@@ -375,7 +418,6 @@ export default function App() {
           }
         }
       }
-
       let targetY: number;
       if (threatBall && minDist < 350) {
         const timeToReach = minDist / Math.abs(threatBall.speed);
@@ -385,26 +427,26 @@ export default function App() {
       } else {
         targetY = p1.y + p1.h / 2 - ai.h / 2;
       }
-
       const aiMid = ai.y + ai.h / 2;
       const targetMid = targetY + ai.h / 2;
-      if (Math.abs(aiMid - targetMid) > 4) {
+      if (Math.abs(aiMid - targetMid) > 4)
         ai.y += aiMid < targetMid ? AI_SPEED : -AI_SPEED;
-      }
       ai.y = Math.max(0, Math.min(CANVAS_H - ai.h, ai.y));
-
       const aligned = Math.abs(ai.y + ai.h / 2 - (p1.y + p1.h / 2)) < 40;
-      if (aligned && now - s.lastThrow2 > AI_THROW_COOLDOWN) {
-        if (Math.random() < 0.3) {
-          s.balls.push({
-            x: ai.x - 4,
-            y: ai.y + ai.h / 2,
-            speed: -BALL_SPEED,
-            vy: (Math.random() - 0.5) * 2,
-            trail: [],
-          });
-          s.lastThrow2 = now;
-        }
+      if (
+        aligned &&
+        now - s.lastThrow2 > AI_THROW_COOLDOWN &&
+        Math.random() < 0.3
+      ) {
+        s.balls.push({
+          x: ai.x - 4,
+          y: ai.y + ai.h / 2,
+          speed: -BALL_SPEED,
+          vy: (Math.random() - 0.5) * 2,
+          trail: [],
+          owner: "p2",
+        });
+        s.lastThrow2 = now;
       }
     }
 
@@ -414,6 +456,21 @@ export default function App() {
       flash: number,
       label?: string,
     ) {
+      if (p.eliminated) {
+        ctx!.save();
+        ctx!.globalAlpha = 0.18;
+        ctx!.fillStyle = color;
+        ctx!.beginPath();
+        ctx!.roundRect(p.x, p.y, p.w, p.h, 6);
+        ctx!.fill();
+        ctx!.globalAlpha = 0.3;
+        ctx!.font = "bold 13px sans-serif";
+        ctx!.textAlign = "center";
+        ctx!.fillStyle = "white";
+        ctx!.fillText("OUT", p.x + p.w / 2, p.y + p.h / 2 + 5);
+        ctx!.restore();
+        return;
+      }
       const alpha =
         flash > 0 && Math.floor(Date.now() / 80) % 2 === 0 ? 0.35 : 1;
       ctx!.save();
@@ -436,21 +493,10 @@ export default function App() {
       ctx!.arc(p.x + p.w * 0.65, eyeY, 5, 0, Math.PI * 2);
       ctx!.fill();
       ctx!.fillStyle = "#111";
+      const eyeDir = color === "#ef4444" ? -1 : color === "#22c55e" ? 0 : 1;
       ctx!.beginPath();
-      ctx!.arc(
-        p.x + p.w * 0.35 + (color === "#ef4444" ? -1 : 1),
-        eyeY,
-        2.5,
-        0,
-        Math.PI * 2,
-      );
-      ctx!.arc(
-        p.x + p.w * 0.65 + (color === "#ef4444" ? -1 : 1),
-        eyeY,
-        2.5,
-        0,
-        Math.PI * 2,
-      );
+      ctx!.arc(p.x + p.w * 0.35 + eyeDir, eyeY, 2.5, 0, Math.PI * 2);
+      ctx!.arc(p.x + p.w * 0.65 + eyeDir, eyeY, 2.5, 0, Math.PI * 2);
       ctx!.fill();
       if (label) {
         ctx!.globalAlpha = 0.9;
@@ -494,56 +540,116 @@ export default function App() {
         ctx!.fillStyle = i % 2 === 0 ? "#1e6638" : "#1a5c32";
         ctx!.fillRect(i * 100, 0, 100, CANVAS_H);
       }
-      ctx!.save();
-      ctx!.setLineDash([12, 8]);
-      ctx!.strokeStyle = "rgba(255,255,255,0.25)";
-      ctx!.lineWidth = 2;
-      ctx!.beginPath();
-      ctx!.moveTo(CANVAS_W / 2, 0);
-      ctx!.lineTo(CANVAS_W / 2, CANVAS_H);
-      ctx!.stroke();
-      ctx!.restore();
-      ctx!.save();
-      ctx!.strokeStyle = "rgba(255,255,255,0.2)";
-      ctx!.lineWidth = 2;
-      ctx!.setLineDash([6, 6]);
-      ctx!.beginPath();
-      ctx!.arc(CANVAS_W / 2, CANVAS_H / 2, 60, 0, Math.PI * 2);
-      ctx!.stroke();
-      ctx!.restore();
+      if (s.mode === "3p") {
+        // Two dividing lines for 3 zones
+        for (const lx of [CANVAS_W / 3, (CANVAS_W * 2) / 3]) {
+          ctx!.save();
+          ctx!.setLineDash([12, 8]);
+          ctx!.strokeStyle = "rgba(255,255,255,0.22)";
+          ctx!.lineWidth = 2;
+          ctx!.beginPath();
+          ctx!.moveTo(lx, 0);
+          ctx!.lineTo(lx, CANVAS_H);
+          ctx!.stroke();
+          ctx!.restore();
+        }
+      } else {
+        ctx!.save();
+        ctx!.setLineDash([12, 8]);
+        ctx!.strokeStyle = "rgba(255,255,255,0.25)";
+        ctx!.lineWidth = 2;
+        ctx!.beginPath();
+        ctx!.moveTo(CANVAS_W / 2, 0);
+        ctx!.lineTo(CANVAS_W / 2, CANVAS_H);
+        ctx!.stroke();
+        ctx!.restore();
+        ctx!.save();
+        ctx!.strokeStyle = "rgba(255,255,255,0.2)";
+        ctx!.lineWidth = 2;
+        ctx!.setLineDash([6, 6]);
+        ctx!.beginPath();
+        ctx!.arc(CANVAS_W / 2, CANVAS_H / 2, 60, 0, Math.PI * 2);
+        ctx!.stroke();
+        ctx!.restore();
+      }
     }
 
     function drawHitIndicators() {
-      for (let i = 0; i < MAX_HITS; i++) {
-        ctx!.beginPath();
-        ctx!.arc(60 + i * 18, CANVAS_H - 20, 6, 0, Math.PI * 2);
-        ctx!.fillStyle = i < s.p1.hits ? "#ef4444" : "#22c55e";
-        ctx!.fill();
-      }
-      for (let i = 0; i < MAX_HITS; i++) {
-        ctx!.beginPath();
-        ctx!.arc(
-          CANVAS_W - 60 - (MAX_HITS - 1 - i) * 18,
-          CANVAS_H - 20,
-          6,
-          0,
-          Math.PI * 2,
-        );
-        ctx!.fillStyle = i < s.p2.hits ? "#ef4444" : "#22c55e";
-        ctx!.fill();
+      if (s.mode === "3p") {
+        // P1 dots bottom-left
+        for (let i = 0; i < MAX_HITS; i++) {
+          ctx!.beginPath();
+          ctx!.arc(50 + i * 18, CANVAS_H - 18, 6, 0, Math.PI * 2);
+          ctx!.fillStyle = i < s.p1.hits ? "#ef4444" : "#22c55e";
+          ctx!.fill();
+        }
+        // P3 dots bottom-center
+        for (let i = 0; i < MAX_HITS; i++) {
+          ctx!.beginPath();
+          ctx!.arc(
+            CANVAS_W / 2 - 18 + i * 18,
+            CANVAS_H - 18,
+            6,
+            0,
+            Math.PI * 2,
+          );
+          ctx!.fillStyle = i < s.p3.hits ? "#ef4444" : "#22c55e";
+          ctx!.fill();
+        }
+        // P2 dots bottom-right
+        for (let i = 0; i < MAX_HITS; i++) {
+          ctx!.beginPath();
+          ctx!.arc(
+            CANVAS_W - 50 - (MAX_HITS - 1 - i) * 18,
+            CANVAS_H - 18,
+            6,
+            0,
+            Math.PI * 2,
+          );
+          ctx!.fillStyle = i < s.p2.hits ? "#ef4444" : "#22c55e";
+          ctx!.fill();
+        }
+      } else {
+        for (let i = 0; i < MAX_HITS; i++) {
+          ctx!.beginPath();
+          ctx!.arc(60 + i * 18, CANVAS_H - 20, 6, 0, Math.PI * 2);
+          ctx!.fillStyle = i < s.p1.hits ? "#ef4444" : "#22c55e";
+          ctx!.fill();
+        }
+        for (let i = 0; i < MAX_HITS; i++) {
+          ctx!.beginPath();
+          ctx!.arc(
+            CANVAS_W - 60 - (MAX_HITS - 1 - i) * 18,
+            CANVAS_H - 20,
+            6,
+            0,
+            Math.PI * 2,
+          );
+          ctx!.fillStyle = i < s.p2.hits ? "#ef4444" : "#22c55e";
+          ctx!.fill();
+        }
       }
     }
 
     function drawGameOver() {
       ctx!.fillStyle = "rgba(0,0,0,0.65)";
       ctx!.fillRect(0, 0, CANVAS_W, CANVAS_H);
-      const isAI = s.mode === "ai";
-      const winnerText =
-        s.p1.hits >= MAX_HITS
-          ? isAI
-            ? "⚡ AI WINS! ⚡"
-            : "⚡ PLAYER 2 WINS! ⚡"
-          : "⚡ PLAYER 1 WINS! ⚡";
+      let winnerText = "";
+      if (s.mode === "3p") {
+        const active = ["p1", "p2", "p3"].filter(
+          (k) => !(s[k as "p1" | "p2" | "p3"] as Player).eliminated,
+        );
+        if (active.length === 1)
+          winnerText = `⚡ PLAYER ${active[0] === "p1" ? 1 : active[0] === "p2" ? 2 : 3} WINS! ⚡`;
+        else winnerText = "⚡ DRAW! ⚡";
+      } else {
+        winnerText =
+          s.p1.hits >= MAX_HITS
+            ? s.mode === "ai"
+              ? "⚡ AI WINS! ⚡"
+              : "⚡ PLAYER 2 WINS! ⚡"
+            : "⚡ PLAYER 1 WINS! ⚡";
+      }
       ctx!.save();
       ctx!.font = "bold 46px 'Bricolage Grotesque', sans-serif";
       ctx!.textAlign = "center";
@@ -554,24 +660,20 @@ export default function App() {
       ctx!.shadowBlur = 0;
       ctx!.font = "22px 'Figtree', sans-serif";
       ctx!.fillStyle = "rgba(255,255,255,0.85)";
-      if (s.mode !== "online") {
+      if (s.mode !== "online")
         ctx!.fillText(
           "Press  [ 1 ]  to Restart",
           CANVAS_W / 2,
           CANVAS_H / 2 + 30,
         );
-      }
       ctx!.restore();
     }
 
     function updateOnlineHost() {
       if (s.gameOver) return;
-      // P1 movement
-      if (s.keys.w || s.keys.W) s.p1.y -= 5;
-      if (s.keys.s || s.keys.S) s.p1.y += 5;
+      if (s.keys.w || s.keys.W) s.p1.y -= 3;
+      if (s.keys.s || s.keys.S) s.p1.y += 3;
       s.p1.y = Math.max(0, Math.min(CANVAS_H - s.p1.h, s.p1.y));
-
-      // P2 position from server
       const srv = latestServerStateRef.current;
       if (srv) {
         s.p2.y = srv.p2Y;
@@ -584,26 +686,22 @@ export default function App() {
               speed: -BALL_SPEED,
               vy: (Math.random() - 0.5) * 2,
               trail: [],
+              owner: "p2",
             });
             s.lastThrow2 = now;
           }
         }
       }
-
       s.p2.y = Math.max(0, Math.min(CANVAS_H - s.p2.h, s.p2.y));
     }
 
     function updateOnlineGuest() {
-      // Guest controls P2 locally for responsiveness
-      if (s.keys.ArrowUp) s.p2.y -= 5;
-      if (s.keys.ArrowDown) s.p2.y += 5;
+      if (s.keys.ArrowUp) s.p2.y -= 3;
+      if (s.keys.ArrowDown) s.p2.y += 3;
       s.p2.y = Math.max(0, Math.min(CANVAS_H - s.p2.h, s.p2.y));
-
-      // Override authoritative state from server
       const srv = latestServerStateRef.current;
       if (srv) {
         s.p1.y = srv.p1Y;
-        // Rebuild balls from server (preserve no trail — fresh each frame)
         s.balls = srv.balls.map((b) => ({
           x: b.x,
           y: b.y,
@@ -611,12 +709,10 @@ export default function App() {
           vy: b.vy,
           trail: [],
         }));
-        const newP1Hits = srv.p1Hits;
-        const newP2Hits = srv.p2Hits;
-        if (newP1Hits !== s.p1.hits || newP2Hits !== s.p2.hits) {
-          s.p1.hits = newP1Hits;
-          s.p2.hits = newP2Hits;
-          setScore({ p1: s.p1.hits, p2: s.p2.hits });
+        if (srv.p1Hits !== s.p1.hits || srv.p2Hits !== s.p2.hits) {
+          s.p1.hits = srv.p1Hits;
+          s.p2.hits = srv.p2Hits;
+          setScore({ p1: s.p1.hits, p2: s.p2.hits, p3: 0 });
         }
         if (srv.gameOver && !s.gameOver) {
           s.gameOver = true;
@@ -629,33 +725,53 @@ export default function App() {
       if (s.gameOver) return;
 
       if (s.mode === "online") {
-        if (onlineRoleRef.current === "host") {
-          updateOnlineHost();
-          // Run physics for balls (host is authoritative)
-        } else if (onlineRoleRef.current === "guest") {
+        if (onlineRoleRef.current === "host") updateOnlineHost();
+        else if (onlineRoleRef.current === "guest") {
           updateOnlineGuest();
-          // Guest doesn't run physics — just renders server state
           if (s.p1Flash > 0) s.p1Flash--;
           if (s.p2Flash > 0) s.p2Flash--;
           return;
         }
       } else if (s.mode === "2p") {
-        if (s.keys.w || s.keys.W) s.p1.y -= 5;
-        if (s.keys.s || s.keys.S) s.p1.y += 5;
+        if (!s.p1.eliminated) {
+          if (s.keys.w || s.keys.W) s.p1.y -= 3;
+          if (s.keys.s || s.keys.S) s.p1.y += 3;
+        }
         s.p1.y = Math.max(0, Math.min(CANVAS_H - s.p1.h, s.p1.y));
-        if (s.keys.ArrowUp) s.p2.y -= 5;
-        if (s.keys.ArrowDown) s.p2.y += 5;
+        if (!s.p2.eliminated) {
+          if (s.keys.ArrowUp) s.p2.y -= 3;
+          if (s.keys.ArrowDown) s.p2.y += 3;
+        }
         s.p2.y = Math.max(0, Math.min(CANVAS_H - s.p2.h, s.p2.y));
-      } else {
-        // AI mode
-        if (s.keys.w || s.keys.W) s.p1.y -= 5;
-        if (s.keys.s || s.keys.S) s.p1.y += 5;
+      } else if (s.mode === "ai") {
+        if (s.keys.w || s.keys.W) s.p1.y -= 3;
+        if (s.keys.s || s.keys.S) s.p1.y += 3;
         s.p1.y = Math.max(0, Math.min(CANVAS_H - s.p1.h, s.p1.y));
         updateAI();
+      } else if (s.mode === "3p") {
+        // P1: W/S
+        if (!s.p1.eliminated) {
+          if (s.keys.w || s.keys.W) s.p1.y -= 3;
+          if (s.keys.s || s.keys.S) s.p1.y += 3;
+        }
+        s.p1.y = Math.max(0, Math.min(CANVAS_H - s.p1.h, s.p1.y));
+        // P2: arrows
+        if (!s.p2.eliminated) {
+          if (s.keys.ArrowUp) s.p2.y -= 3;
+          if (s.keys.ArrowDown) s.p2.y += 3;
+        }
+        s.p2.y = Math.max(0, Math.min(CANVAS_H - s.p2.h, s.p2.y));
+        // P3: I/K
+        if (!s.p3.eliminated) {
+          if (s.keys.i || s.keys.I) s.p3.y -= 4;
+          if (s.keys.k || s.keys.K) s.p3.y += 4;
+        }
+        s.p3.y = Math.max(0, Math.min(CANVAS_H - s.p3.h, s.p3.y));
       }
 
       if (s.p1Flash > 0) s.p1Flash--;
       if (s.p2Flash > 0) s.p2Flash--;
+      if (s.p3Flash > 0) s.p3Flash--;
 
       for (let i = s.balls.length - 1; i >= 0; i--) {
         const b = s.balls[i];
@@ -665,45 +781,76 @@ export default function App() {
         b.y += b.vy;
         if (b.y < 8 || b.y > CANVAS_H - 8) b.vy *= -1;
 
-        if (
-          b.speed > 0 &&
-          b.x + 8 > s.p2.x &&
-          b.x - 8 < s.p2.x + s.p2.w &&
-          b.y + 8 > s.p2.y &&
-          b.y - 8 < s.p2.y + s.p2.h
-        ) {
-          s.p2.hits++;
-          s.p2Flash = 20;
-          s.balls.splice(i, 1);
-          setScore({ p1: s.p1.hits, p2: s.p2.hits });
-          continue;
+        let hit = false;
+
+        if (s.mode === "3p") {
+          // Check all non-owner, non-eliminated players
+          const targets: Array<[Player, "p1" | "p2" | "p3", number]> = [
+            [s.p1, "p1", 0],
+            [s.p2, "p2", 0],
+            [s.p3, "p3", 0],
+          ];
+          for (const [tp, key] of targets) {
+            if (b.owner === key || tp.eliminated) continue;
+            if (hitTest(b, tp)) {
+              tp.hits++;
+              if (key === "p1") s.p1Flash = 20;
+              else if (key === "p2") s.p2Flash = 20;
+              else s.p3Flash = 20;
+              s.balls.splice(i, 1);
+              setScore({ p1: s.p1.hits, p2: s.p2.hits, p3: s.p3.hits });
+              hit = true;
+              break;
+            }
+          }
+        } else {
+          // 2p / ai / online
+          if (b.speed > 0 && hitTest(b, s.p2)) {
+            s.p2.hits++;
+            s.p2Flash = 20;
+            s.balls.splice(i, 1);
+            setScore({ p1: s.p1.hits, p2: s.p2.hits, p3: 0 });
+            hit = true;
+          } else if (b.speed < 0 && hitTest(b, s.p1)) {
+            s.p1.hits++;
+            s.p1Flash = 20;
+            s.balls.splice(i, 1);
+            setScore({ p1: s.p1.hits, p2: s.p2.hits, p3: 0 });
+            hit = true;
+          }
         }
 
-        if (
-          b.speed < 0 &&
-          b.x + 8 > s.p1.x &&
-          b.x - 8 < s.p1.x + s.p1.w &&
-          b.y + 8 > s.p1.y &&
-          b.y - 8 < s.p1.y + s.p1.h
-        ) {
-          s.p1.hits++;
-          s.p1Flash = 20;
-          s.balls.splice(i, 1);
-          setScore({ p1: s.p1.hits, p2: s.p2.hits });
-          continue;
-        }
-
-        if (b.x < -20 || b.x > CANVAS_W + 20) {
-          s.balls.splice(i, 1);
-        }
+        if (!hit && (b.x < -20 || b.x > CANVAS_W + 20)) s.balls.splice(i, 1);
       }
 
-      if (s.p1.hits >= MAX_HITS || s.p2.hits >= MAX_HITS) {
-        s.gameOver = true;
-        const isAI = s.mode === "ai";
-        setWinner(
-          s.p1.hits >= MAX_HITS ? (isAI ? "AI" : "PLAYER 2") : "PLAYER 1",
+      if (s.mode === "3p") {
+        // Mark eliminations
+        if (!s.p1.eliminated && s.p1.hits >= MAX_HITS) s.p1.eliminated = true;
+        if (!s.p2.eliminated && s.p2.hits >= MAX_HITS) s.p2.eliminated = true;
+        if (!s.p3.eliminated && s.p3.hits >= MAX_HITS) s.p3.eliminated = true;
+        const activePlayers = (["p1", "p2", "p3"] as const).filter(
+          (k) => !s[k].eliminated,
         );
+        if (activePlayers.length <= 1) {
+          s.gameOver = true;
+          if (activePlayers.length === 1) {
+            const k = activePlayers[0];
+            setWinner(
+              k === "p1" ? "PLAYER 1" : k === "p2" ? "PLAYER 2" : "PLAYER 3",
+            );
+          } else setWinner("DRAW");
+        }
+      } else {
+        if (s.p1.hits >= MAX_HITS || s.p2.hits >= MAX_HITS) {
+          s.gameOver = true;
+          setWinner(
+            s.p1.hits >= MAX_HITS
+              ? s.mode === "ai"
+                ? "AI"
+                : "PLAYER 2"
+              : "PLAYER 1",
+          );
+        }
       }
     }
 
@@ -717,6 +864,7 @@ export default function App() {
         s.p2Flash,
         s.mode === "ai" ? "AI" : undefined,
       );
+      if (s.mode === "3p") drawPlayer(s.p3, "#22c55e", s.p3Flash);
       s.balls.forEach(drawBall);
       if (s.gameOver) drawGameOver();
     }
@@ -726,9 +874,7 @@ export default function App() {
       draw();
       s.animFrameId = requestAnimationFrame(loop);
     }
-
     s.animFrameId = requestAnimationFrame(loop);
-
     return () => {
       cancelAnimationFrame(s.animFrameId);
       window.removeEventListener("keydown", onKeyDown);
@@ -740,9 +886,40 @@ export default function App() {
     background: "rgba(255,255,255,0.1)",
     border: "1px solid rgba(255,255,255,0.2)",
   };
-
   const isOnlineActive = mode === "online";
   const showCanvas = !isOnlineActive || onlineScreen === "ingame";
+
+  const modeButtons: Array<{
+    key: GameMode;
+    label: string;
+    color: string;
+    glow: string;
+  }> = [
+    {
+      key: "2p",
+      label: "👥 2 Player",
+      color: "#3b82f6",
+      glow: "rgba(59,130,246,0.45)",
+    },
+    {
+      key: "3p",
+      label: "👾 3 Player",
+      color: "#a855f7",
+      glow: "rgba(168,85,247,0.45)",
+    },
+    {
+      key: "ai",
+      label: "🤖 vs AI",
+      color: "#ef4444",
+      glow: "rgba(239,68,68,0.45)",
+    },
+    {
+      key: "online",
+      label: "🌐 Online",
+      color: "#22c55e",
+      glow: "rgba(34,197,94,0.45)",
+    },
+  ];
 
   return (
     <div
@@ -752,7 +929,6 @@ export default function App() {
           "linear-gradient(160deg, #0d0d1a 0%, #0a1a0f 50%, #0d0d1a 100%)",
       }}
     >
-      {/* Title */}
       <div className="mb-4 text-center">
         <h1
           className="title-pulse text-4xl md:text-5xl font-extrabold tracking-tight uppercase"
@@ -773,84 +949,46 @@ export default function App() {
         >
           {mode === "2p"
             ? "2 PLAYER EDITION"
-            : mode === "ai"
-              ? "VS AI EDITION"
-              : "ONLINE MULTIPLAYER"}
+            : mode === "3p"
+              ? "3 PLAYER EDITION"
+              : mode === "ai"
+                ? "VS AI EDITION"
+                : "ONLINE MULTIPLAYER"}
         </p>
       </div>
 
       {/* Mode toggle */}
       <div className="flex gap-2 mb-4">
-        <button
-          type="button"
-          data-ocid="game.tab.1"
-          onClick={() => switchMode("2p")}
-          className="px-5 py-2 rounded-lg font-bold text-sm uppercase tracking-wide transition-all"
-          style={{
-            fontFamily: "'Bricolage Grotesque', sans-serif",
-            background:
-              mode === "2p"
-                ? "linear-gradient(135deg,#3b82f6,#1d4ed8)"
-                : "rgba(255,255,255,0.07)",
-            color: mode === "2p" ? "white" : "rgba(255,255,255,0.5)",
-            border:
-              mode === "2p"
-                ? "1px solid #3b82f6"
-                : "1px solid rgba(255,255,255,0.15)",
-            boxShadow:
-              mode === "2p" ? "0 0 14px rgba(59,130,246,0.45)" : "none",
-          }}
-        >
-          👥 2 Player
-        </button>
-        <button
-          type="button"
-          data-ocid="game.tab.2"
-          onClick={() => switchMode("ai")}
-          className="px-5 py-2 rounded-lg font-bold text-sm uppercase tracking-wide transition-all"
-          style={{
-            fontFamily: "'Bricolage Grotesque', sans-serif",
-            background:
-              mode === "ai"
-                ? "linear-gradient(135deg,#ef4444,#b91c1c)"
-                : "rgba(255,255,255,0.07)",
-            color: mode === "ai" ? "white" : "rgba(255,255,255,0.5)",
-            border:
-              mode === "ai"
-                ? "1px solid #ef4444"
-                : "1px solid rgba(255,255,255,0.15)",
-            boxShadow: mode === "ai" ? "0 0 14px rgba(239,68,68,0.45)" : "none",
-          }}
-        >
-          🤖 vs AI
-        </button>
-        <button
-          type="button"
-          data-ocid="game.tab.3"
-          onClick={() => switchMode("online")}
-          className="px-5 py-2 rounded-lg font-bold text-sm uppercase tracking-wide transition-all"
-          style={{
-            fontFamily: "'Bricolage Grotesque', sans-serif",
-            background:
-              mode === "online"
-                ? "linear-gradient(135deg,#22c55e,#15803d)"
-                : "rgba(255,255,255,0.07)",
-            color: mode === "online" ? "white" : "rgba(255,255,255,0.5)",
-            border:
-              mode === "online"
-                ? "1px solid #22c55e"
-                : "1px solid rgba(255,255,255,0.15)",
-            boxShadow:
-              mode === "online" ? "0 0 14px rgba(34,197,94,0.45)" : "none",
-          }}
-        >
-          🌐 Online
-        </button>
+        {modeButtons.map(({ key, label, color, glow }) => {
+          const active = mode === key;
+          return (
+            <button
+              key={key}
+              type="button"
+              data-ocid={`game.tab.${key}`}
+              onClick={() => switchMode(key)}
+              className="px-5 py-2 rounded-lg font-bold text-sm uppercase tracking-wide transition-all"
+              style={{
+                fontFamily: "'Bricolage Grotesque', sans-serif",
+                background: active
+                  ? `linear-gradient(135deg, ${color}, ${color}cc)`
+                  : "rgba(255,255,255,0.07)",
+                color: active ? "white" : "rgba(255,255,255,0.5)",
+                border: active
+                  ? `1px solid ${color}`
+                  : "1px solid rgba(255,255,255,0.15)",
+                boxShadow: active ? `0 0 14px ${glow}` : "none",
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
       </div>
 
       {/* Score board */}
       {(!isOnlineActive || onlineScreen === "ingame") && (
-        <div className="score-badge flex items-center gap-6 px-6 py-3 rounded-xl mb-3">
+        <div className="score-badge flex items-center gap-4 px-6 py-3 rounded-xl mb-3">
           <div className="flex items-center gap-2">
             <div
               className="w-4 h-4 rounded-sm"
@@ -863,7 +1001,7 @@ export default function App() {
                 fontWeight: 700,
               }}
             >
-              P1 Hits:
+              P1:
             </span>
             <span
               className="text-xl font-black"
@@ -875,6 +1013,40 @@ export default function App() {
               {score.p1}
             </span>
           </div>
+          {mode === "3p" && (
+            <>
+              <div style={{ color: "oklch(0.4 0.04 260)", fontWeight: 700 }}>
+                VS
+              </div>
+              <div className="flex items-center gap-2">
+                <div
+                  className="w-4 h-4 rounded-sm"
+                  style={{
+                    background: "#22c55e",
+                    boxShadow: "0 0 8px #22c55e",
+                  }}
+                />
+                <span
+                  style={{
+                    fontFamily: "'Bricolage Grotesque', sans-serif",
+                    color: "white",
+                    fontWeight: 700,
+                  }}
+                >
+                  P3:
+                </span>
+                <span
+                  className="text-xl font-black"
+                  style={{
+                    color: score.p3 > 0 ? "#ef4444" : "#22c55e",
+                    fontFamily: "'Bricolage Grotesque', sans-serif",
+                  }}
+                >
+                  {score.p3}
+                </span>
+              </div>
+            </>
+          )}
           <div style={{ color: "oklch(0.4 0.04 260)", fontWeight: 700 }}>
             VS
           </div>
@@ -895,7 +1067,7 @@ export default function App() {
                 fontWeight: 700,
               }}
             >
-              :{mode === "ai" ? "AI Hits" : "P2 Hits"}
+              {mode === "ai" ? ":AI" : ":P2"}
             </span>
             <div
               className="w-4 h-4 rounded-sm"
@@ -905,7 +1077,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Canvas area */}
+      {/* Canvas */}
       <div
         style={{
           border: "2px solid oklch(0.35 0.08 145)",
@@ -920,7 +1092,6 @@ export default function App() {
           justifyContent: "center",
         }}
       >
-        {/* Canvas — always rendered so game loop stays alive */}
         <canvas
           ref={canvasRef}
           id="game"
@@ -969,7 +1140,6 @@ export default function App() {
                 Play with a friend anywhere in the world
               </p>
             </div>
-
             {onlineError && (
               <div
                 data-ocid="online.error_state"
@@ -986,9 +1156,7 @@ export default function App() {
                 {onlineError}
               </div>
             )}
-
             <div style={{ display: "flex", gap: 24 }}>
-              {/* Create Game */}
               <div
                 style={{
                   background: "rgba(59,130,246,0.12)",
@@ -1046,7 +1214,6 @@ export default function App() {
                   {onlineLoading === "creating" ? "Creating..." : "Create Room"}
                 </button>
               </div>
-
               <div
                 style={{
                   display: "flex",
@@ -1058,8 +1225,6 @@ export default function App() {
               >
                 OR
               </div>
-
-              {/* Join Game */}
               <div
                 style={{
                   background: "rgba(34,197,94,0.1)",
@@ -1191,7 +1356,6 @@ export default function App() {
                 Share this code with your friend
               </p>
             </div>
-
             <button
               type="button"
               data-ocid="online.primary_button"
@@ -1231,7 +1395,6 @@ export default function App() {
                 {copied ? "✅ Copied!" : "Click to copy"}
               </div>
             </button>
-
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               <div style={{ display: "flex", gap: 6 }}>
                 {[0, 1, 2].map((i) => (
@@ -1257,7 +1420,6 @@ export default function App() {
                 Waiting for Player 2...
               </span>
             </div>
-
             <button
               type="button"
               data-ocid="online.cancel_button"
@@ -1285,7 +1447,7 @@ export default function App() {
         )}
       </div>
 
-      {/* Restart button (non-online) */}
+      {/* Restart / Play Again */}
       {winner && mode !== "online" && (
         <button
           type="button"
@@ -1302,14 +1464,10 @@ export default function App() {
           🔄 Restart Game
         </button>
       )}
-
-      {/* Online game over — back to lobby */}
       {winner && mode === "online" && (
         <button
           type="button"
-          onClick={() => {
-            switchMode("online");
-          }}
+          onClick={() => switchMode("online")}
           data-ocid="online.secondary_button"
           className="mt-4 px-8 py-3 rounded-lg font-bold text-lg uppercase tracking-wide transition-all hover:scale-105 active:scale-95"
           style={{
@@ -1323,7 +1481,6 @@ export default function App() {
         </button>
       )}
 
-      {/* Connection lost banner */}
       {connectionLost && mode === "online" && onlineScreen === "ingame" && (
         <div
           data-ocid="online.error_state"
@@ -1343,7 +1500,10 @@ export default function App() {
       )}
 
       {/* Controls legend */}
-      <div className="mt-4 grid grid-cols-2 gap-4 w-full max-w-2xl px-4">
+      <div
+        className={`mt-4 grid gap-4 w-full px-4 ${mode === "3p" ? "grid-cols-3 max-w-3xl" : "grid-cols-2 max-w-2xl"}`}
+      >
+        {/* P1 */}
         <div
           className="p-4 rounded-xl"
           style={{
@@ -1364,7 +1524,7 @@ export default function App() {
               }}
             >
               {mode === "online" && playerRole === "guest"
-                ? "Player 1 (Blue) — Opponent"
+                ? "P1 — Opponent"
                 : "Player 1 (Blue)"}
             </span>
           </div>
@@ -1394,18 +1554,76 @@ export default function App() {
                 <kbd className="px-1.5 py-0.5 rounded text-xs" style={kbdStyle}>
                   S
                 </kbd>
-                {" — Move Up / Down"}
+                {" — Move"}
               </div>
               <div>
                 <kbd className="px-1.5 py-0.5 rounded text-xs" style={kbdStyle}>
                   F
                 </kbd>
-                {" — Throw Ball"}
+                {" — Throw"}
               </div>
             </div>
           )}
         </div>
 
+        {/* P3 (3p only) */}
+        {mode === "3p" && (
+          <div
+            className="p-4 rounded-xl"
+            style={{
+              background: "rgba(34,197,94,0.1)",
+              border: "1px solid rgba(34,197,94,0.35)",
+            }}
+          >
+            <div className="flex items-center gap-2 mb-2">
+              <div
+                className="w-3 h-3 rounded-sm"
+                style={{ background: "#22c55e" }}
+              />
+              <span
+                className="font-bold text-sm uppercase tracking-wide"
+                style={{
+                  color: "#22c55e",
+                  fontFamily: "'Bricolage Grotesque', sans-serif",
+                }}
+              >
+                Player 3 (Green)
+              </span>
+            </div>
+            <div
+              className="text-sm space-y-1"
+              style={{
+                color: "rgba(255,255,255,0.75)",
+                fontFamily: "'Figtree', sans-serif",
+              }}
+            >
+              <div>
+                <kbd className="px-1.5 py-0.5 rounded text-xs" style={kbdStyle}>
+                  I
+                </kbd>
+                {" / "}
+                <kbd className="px-1.5 py-0.5 rounded text-xs" style={kbdStyle}>
+                  K
+                </kbd>
+                {" — Move"}
+              </div>
+              <div>
+                <kbd className="px-1.5 py-0.5 rounded text-xs" style={kbdStyle}>
+                  J
+                </kbd>
+                {" ← throw left"}
+              </div>
+              <div>
+                <kbd className="px-1.5 py-0.5 rounded text-xs" style={kbdStyle}>
+                  O
+                </kbd>
+                {" → throw right"}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* P2 */}
         <div
           className="p-4 rounded-xl"
           style={{
@@ -1428,7 +1646,7 @@ export default function App() {
               {mode === "ai"
                 ? "AI Opponent 🤖"
                 : mode === "online" && playerRole === "host"
-                  ? "Player 2 (Red) — Opponent"
+                  ? "P2 — Opponent"
                   : "Player 2 (Red)"}
             </span>
           </div>
@@ -1440,7 +1658,7 @@ export default function App() {
                 fontFamily: "'Figtree', sans-serif",
               }}
             >
-              Controlled by the computer. Good luck!
+              Controlled by the computer.
             </div>
           ) : mode === "online" && playerRole === "host" ? (
             <div
@@ -1468,13 +1686,13 @@ export default function App() {
                 <kbd className="px-1.5 py-0.5 rounded text-xs" style={kbdStyle}>
                   ↓
                 </kbd>
-                {" — Move Up / Down"}
+                {" — Move"}
               </div>
               <div>
                 <kbd className="px-1.5 py-0.5 rounded text-xs" style={kbdStyle}>
                   L
                 </kbd>
-                {" — Throw Ball"}
+                {" — Throw"}
               </div>
             </div>
           )}
@@ -1491,6 +1709,7 @@ export default function App() {
         First to receive{" "}
         <strong style={{ color: "rgba(255,255,255,0.55)" }}>3 hits</strong>{" "}
         loses
+        {mode === "3p" && " — elimination style, last player standing wins"}
         {mode !== "online" && (
           <>
             {" "}
